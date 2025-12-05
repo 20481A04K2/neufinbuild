@@ -1,0 +1,146 @@
+name: Deploy to UAT (GCP Dummy Test)
+
+on:
+  push:
+    branches:
+      - uat
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-south1
+  REPO_NAME: lumen-repo
+  SERVICE_NAME: lumen-uat-service
+  # Define dynamic image tags based on commit SHA
+  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lumen-repo/fastapi:lumen-uat-${{ github.sha }}
+  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lumen-repo/nginx:lumen-uat-${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: uat
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 1. Authenticate to Google Cloud
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # 2. Configure Docker to use Google Cloud credentials
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # 3. Create environment file with DUMMY values (Except Slack)
+      - name: Create environment file
+        run: |
+          cat > .env.uat << EOL
+          # --- REAL SECRETS (SLACK ONLY) ---
+          SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_ALERT_CHANNEL=${{ secrets.SLACK_ALERT_CHANNEL }}
+          
+          # --- DUMMY VALUES FOR TESTING ---
+          DATABASE_URL=postgresql://dummy_user:dummy_pass@localhost:5432/dummy_db
+          ANTHROPIC_CLIENT_KEY=sk-ant-dummy-12345
+          NEUFIN_BACKEND_S3_BUCKET=dummy-bucket
+          NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY=dummy-secret-key
+          NEUFIN_BACKEND_S3_REGION=ap-south-1
+          NEUFIN_BACKEND_S3_ACCESS_KEY_ID=dummy-access-key
+          API_KEY=dummy-api-key-123
+          SERVICE_ACCOUNT_JSON={"type": "service_account", "project_id": "dummy-project"}
+          SERVICE_ACCOUNT_PATH=/tmp/service-account.json
+          CLERK_WEBHOOK_SIGNING_SECRET=whsec_dummy123
+          CLERK_SECRET_KEY=sk_test_dummy123
+          SECRET_KEY=django-insecure-dummy-key
+          RAZORPAY_AUTH_TOKEN=dummy_token
+          ELMEASURE_URL=http://dummy-url.com
+          RAZORPAY_VA_CREDITED_WEBHOOK_SECRET=dummy_secret
+          ENV=dev
+          EOL
+
+      # 4. Build and Push FastAPI Image
+      - name: Build and push FastAPI image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: docker/uat/Dockerfile.fastapi
+          platforms: linux/x86_64
+          push: true
+          tags: ${{ env.FASTAPI_IMAGE }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # 5. Build and Push Nginx Image
+      - name: Build and push Nginx image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: docker/uat/Dockerfile.nginx
+          platforms: linux/x86_64
+          push: true
+          tags: ${{ env.NGINX_IMAGE }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # 6. Generate Cloud Run Service YAML (Multi-Container Sidecar)
+      - name: Create Cloud Run Service YAML
+        run: |
+          cat > service.yaml <<EOF
+          apiVersion: serving.knative.dev/v1
+          kind: Service
+          metadata:
+            name: ${{ env.SERVICE_NAME }}
+            annotations:
+              run.googleapis.com/launch-stage: BETA
+          spec:
+            template:
+              metadata:
+                annotations:
+                  run.googleapis.com/execution-environment: gen2 # Required for sidecars
+              spec:
+                containers:
+                  # Container 1: Nginx (Ingress - Receives Traffic)
+                  - image: ${{ env.NGINX_IMAGE }}
+                    name: nginx
+                    ports:
+                      - containerPort: 80
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 1000m
+                  
+                  # Container 2: FastAPI (Sidecar - Backend)
+                  - image: ${{ env.FASTAPI_IMAGE }}
+                    name: fastapi
+                    env:
+                      - name: PORT
+                        value: "8000"
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 1000m
+          EOF
+
+      # 7. Deploy to Cloud Run
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run services replace service.yaml --region ${{ env.REGION }}
