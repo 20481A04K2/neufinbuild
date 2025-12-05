@@ -3,7 +3,7 @@ name: Deploy to UAT (GCP Dummy Test)
 on:
   push:
     branches:
-      - uat
+      - main
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
