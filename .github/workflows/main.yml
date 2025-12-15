@@ -1,3 +1,5 @@
+.github/workflows/main.yml
+
 name: Deploy to UAT (GCP Dummy Test)
 
 on:
@@ -45,7 +47,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      # 3. Create environment file with DUMMY values (Except Slack)
+      # 3. Create environment file
+      # Ensure your Dockerfile copies this file to the root as .env or loads it explicitly!
       - name: Create environment file
         run: |
           cat > .env.uat << EOL
@@ -101,7 +104,7 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
-      # 6. Generate Cloud Run Service YAML (Multi-Container Sidecar)
+      # 6. Generate Cloud Run Service YAML (Fixed for Sidecar Ordering & Latency)
       - name: Create Cloud Run Service YAML
         run: |
           cat > service.yaml <<EOF
@@ -115,20 +118,14 @@ jobs:
             template:
               metadata:
                 annotations:
-                  run.googleapis.com/execution-environment: gen2 # Required for sidecars
+                  run.googleapis.com/execution-environment: gen2
+                  # SCALING: Keeps 1 instance alive to eliminate Cold Start Latency
+                  autoscaling.knative.dev/minScale: "1"
+                  # BOOST: Uses extra CPU during boot to load Python faster
+                  run.googleapis.com/startup-cpu-boost: "true"
               spec:
                 containers:
-                  # Container 1: Nginx (Ingress - Receives Traffic)
-                  - image: ${{ env.NGINX_IMAGE }}
-                    name: nginx
-                    ports:
-                      - containerPort: 80
-                    resources:
-                      limits:
-                        memory: 512Mi
-                        cpu: 1000m
-                  
-                  # Container 2: FastAPI (Sidecar - Backend)
+                  # Container 1: FastAPI (Sidecar - Backend)-
                   - image: ${{ env.FASTAPI_IMAGE }}
                     name: fastapi
                     env:
@@ -138,6 +135,24 @@ jobs:
                       limits:
                         memory: 512Mi
                         cpu: 1000m
+                    # CRITICAL: Tells Cloud Run "I am ready when Port 8000 is open"
+                    startupProbe:
+                      tcpSocket:
+                        port: 8000
+                      initialDelaySeconds: 5
+                      periodSeconds: 2
+                      failureThreshold: 10
+
+                  # Container 1: Nginx (Ingress - Receives Traffic)-
+                  - image: ${{ env.NGINX_IMAGE }}
+                    name: nginx
+                    ports:
+                      - containerPort: 80
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 1000m
+                    
           EOF
 
       # 7. Deploy to Cloud Run
