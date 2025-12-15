@@ -159,3 +159,11 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           gcloud run services replace service.yaml --region ${{ env.REGION }}
+          
+     # 8. Set SERVICE SCALING (Global)
+      # This explicitly sets the "Service scaling" section in the GCP UI to 1.
+      - name: Update Service Scaling
+        run: |
+          gcloud run services update ${{ env.SERVICE_NAME }} \
+            --min-instances 1 \
+            --region ${{ env.REGION }}     
