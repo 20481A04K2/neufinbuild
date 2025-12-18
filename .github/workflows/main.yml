@@ -158,11 +158,6 @@ jobs:
       # 7. Deploy to Cloud Run
       - name: Deploy to Cloud Run
         run: |
-          gcloud run services update ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --container fastapi \
-            --image ${{ env.FASTAPI_IMAGE }} \
-            --container nginx \
-            --image ${{ env.NGINX_IMAGE }}
+          gcloud run services replace service.yaml --region ${{ env.REGION }}
           
    
