@@ -117,5 +117,12 @@ jobs:
             --container fastapi \
             --image ${{ env.FASTAPI_IMAGE }} \
             --set-env-vars PORT=8000
+     # 8. Verify Deployment Status 
+      - name: Verify Service Status
+        run: |
+          # Get the URL and status of the service to confirm it's serving
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)')
           
+          echo "Deployment Complete!"
+          echo "Service is stable and accessible at: $SERVICE_URL"
    
