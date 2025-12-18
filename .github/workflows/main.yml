@@ -130,7 +130,7 @@ jobs:
                     resources:
                       limits:
                         memory: 512Mi
-                        cpu: 500m
+                        cpu: "500m"
                         
                   # --- CONTAINER 2: FASTAPI (Backend - Port 8000) ---
                   - name: fastapi
@@ -141,7 +141,7 @@ jobs:
                     resources:
                       limits:
                         memory: 8Gi
-                        cpu: 4
+                        cpu: "4"
                     # CRITICAL: Cloud Run waits for this probe before routing traffic to Nginx
                     startupProbe:
                       tcpSocket:
