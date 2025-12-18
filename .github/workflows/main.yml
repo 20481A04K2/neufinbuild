@@ -1,5 +1,3 @@
-
-
 name: Deploy to UAT (GCP Dummy Test)
 
 on:
@@ -48,30 +46,26 @@ jobs:
             ${{ runner.os }}-buildx-
 
       # 3. Create environment file
-      # Ensure your Dockerfile copies this file to the root as .env or loads it explicitly!
       - name: Create environment file
         run: |
           cat > .env.uat << EOL
-          # --- REAL SECRETS (SLACK ONLY) ---
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          ANTHROPIC_CLIENT_KEY=${{ secrets.ANTHROPIC_CLIENT_KEY }}
+          NEUFIN_BACKEND_S3_BUCKET=${{ secrets.NEUFIN_BACKEND_S3_BUCKET }}
+          NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY=${{ secrets.NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY }}
+          NEUFIN_BACKEND_S3_REGION=${{ secrets.NEUFIN_BACKEND_S3_REGION }}
+          NEUFIN_BACKEND_S3_ACCESS_KEY_ID=${{ secrets.NEUFIN_BACKEND_S3_ACCESS_KEY_ID }}
           SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_ALERT_CHANNEL=${{ secrets.SLACK_ALERT_CHANNEL }}
-          
-          # --- DUMMY VALUES FOR TESTING ---
-          DATABASE_URL=postgresql://dummy_user:dummy_pass@localhost:5432/dummy_db
-          ANTHROPIC_CLIENT_KEY=sk-ant-dummy-12345
-          NEUFIN_BACKEND_S3_BUCKET=dummy-bucket
-          NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY=dummy-secret-key
-          NEUFIN_BACKEND_S3_REGION=ap-south-1
-          NEUFIN_BACKEND_S3_ACCESS_KEY_ID=dummy-access-key
-          API_KEY=dummy-api-key-123
-          SERVICE_ACCOUNT_JSON={"type": "service_account", "project_id": "dummy-project"}
+          API_KEY=${{ secrets.API_KEY }}
+          SERVICE_ACCOUNT_JSON=${{ secrets.SERVICE_ACCOUNT_JSON }}
           SERVICE_ACCOUNT_PATH=/tmp/service-account.json
-          CLERK_WEBHOOK_SIGNING_SECRET=whsec_dummy123
-          CLERK_SECRET_KEY=sk_test_dummy123
-          SECRET_KEY=django-insecure-dummy-key
-          RAZORPAY_AUTH_TOKEN=dummy_token
-          ELMEASURE_URL=http://dummy-url.com
-          RAZORPAY_VA_CREDITED_WEBHOOK_SECRET=dummy_secret
+          CLERK_WEBHOOK_SIGNING_SECRET=${{secrets.CLERK_WEBHOOK_SIGNING_SECRET}}
+          CLERK_SECRET_KEY=${{secrets.CLERK_SECRET_KEY}}
+          SECRET_KEY=${{secrets.SECRET_KEY}}
+          RAZORPAY_AUTH_TOKEN=${{secrets.RAZORPAY_AUTH_TOKEN}}
+          ELMEASURE_URL=${{secrets.ELMEASURE_URL}}
+          RAZORPAY_VA_CREDITED_WEBHOOK_SECRET=${{secrets.RAZORPAY_VA_CREDITED_WEBHOOK_SECRET}}
           ENV=dev
           EOL
 
@@ -104,25 +98,67 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
+      # 6. Generate Cloud Run Service YAML
+      # This file defines the explicit resources (4vCPU/8GB) and Sidecar logic
+      - name: Create Cloud Run Service YAML
+        run: |
+          cat > service.yaml <<EOF
+          apiVersion: serving.knative.dev/v1
+          kind: Service
+          metadata:
+            name: ${{ env.SERVICE_NAME }}
+            labels:
+              cloud.googleapis.com/location: ${{ env.REGION }}
+            annotations:
+              run.googleapis.com/launch-stage: BETA
+          spec:
+            template:
+              metadata:
+                annotations:
+                  run.googleapis.com/execution-environment: gen2
+                  autoscaling.knative.dev/minScale: "1"
+                  run.googleapis.com/startup-cpu-boost: "true"
+              spec:
+                # Explicitly define the Service Account
+                serviceAccountName: 929981480750-compute@developer.gserviceaccount.com
+                containers:
+                  # --- CONTAINER 1: NGINX (Ingress - Port 80) ---
+                  - name: nginx
+                    image: ${{ env.NGINX_IMAGE }}
+                    ports:
+                      - containerPort: 80
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 500m
+                        
+                  # --- CONTAINER 2: FASTAPI (Backend - Port 8000) ---
+                  - name: fastapi
+                    image: ${{ env.FASTAPI_IMAGE }}
+                    env:
+                      - name: PORT
+                        value: "8000"
+                    resources:
+                      limits:
+                        memory: 8Gi
+                        cpu: 4
+                    # CRITICAL: Cloud Run waits for this probe before routing traffic to Nginx
+                    startupProbe:
+                      tcpSocket:
+                        port: 8000
+                      initialDelaySeconds: 5
+                      periodSeconds: 2
+                      failureThreshold: 10
+          EOF
 
-
-      # 6. Deploy to Cloud Run
+      # 7. Deploy to Cloud Run (Using REPLACE to enforce the YAML config)
       - name: Deploy to Cloud Run
         run: |
-          gcloud run services update ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --container nginx \
-            --image ${{ env.NGINX_IMAGE }} \
-            --port 80 \
-            --container fastapi \
-            --image ${{ env.FASTAPI_IMAGE }} \
-            --set-env-vars PORT=8000
-     # 8. Verify Deployment Status 
+          gcloud run services replace service.yaml --region ${{ env.REGION }}
+      
+      # 8. Verify Deployment Status
       - name: Verify Service Status
         run: |
-          # Get the URL and status of the service to confirm it's serving
           SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)')
-          
           echo "Deployment Complete!"
           echo "Service is stable and accessible at: $SERVICE_URL"
-   
