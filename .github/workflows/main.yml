@@ -6,13 +6,13 @@ on:
       - main
 
 env:
-  PROJECT_ID: ${{ secrets.UAT_GCP_PROJECT_ID }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: asia-south1
   REPO_NAME: lumen-repo
   SERVICE_NAME: lumen-uat-service
   # Define dynamic image tags based on commit SHA
-  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.UAT_GCP_PROJECT_ID }}/lumen-repo/fastapi:lumen-uat-${{ github.sha }}
-  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.UAT_GCP_PROJECT_ID }}/lumen-repo/nginx:lumen-uat-${{ github.sha }}
+  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lumen-repo/fastapi:lumen-uat-${{ github.sha }}
+  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lumen-repo/nginx:lumen-uat-${{ github.sha }}
 
 jobs:
   build-and-deploy:
@@ -28,7 +28,7 @@ jobs:
         id: auth
         uses: google-github-actions/auth@v1
         with:
-          credentials_json: ${{ secrets.UAT_GCP_SA_KEY }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       # 2. Configure Docker to use Google Cloud credentials
       - name: Configure Docker
