@@ -1,5 +1,10 @@
 import os
 from fastapi import FastAPI
+from dotenv import load_dotenv
+
+# IMPORTANT: Load the .env file as early as possible
+# This looks for a file named ".env" in the same directory
+load_dotenv()
 
 app = FastAPI()
 
@@ -11,16 +16,16 @@ def mask_secret(value: str):
 
 @app.get("/healthz")
 def health_check():
-    """Matches the startup, readiness, and liveness probes in YAML."""
+    """FastAPI health endpoint for Cloud Run Probes."""
     return {"status": "healthy"}
 
 @app.get("/")
 def read_root():
-    return {"message": "Lumen UAT Service is Live"}
+    return {"message": "Lumen UAT Service is Live (via .env file)"}
 
 @app.get("/env-test")
 def read_dummy_env():
-    """Verify if secrets are injected into Cloud Run OS environment."""
+    """Verify if secrets are successfully loaded from the .env file."""
     return {
         "ENV": os.getenv("ENV"),
         "DATABASE_URL_MASKED": mask_secret(os.getenv("DATABASE_URL")),
@@ -33,6 +38,6 @@ def read_dummy_env():
 
 if __name__ == "__main__":
     import uvicorn
-    # PORT is injected by Cloud Run (default 8000)
+    # PORT is usually provided by Cloud Run, default to 8000
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
