@@ -1,35 +1,31 @@
 import os
 from fastapi import FastAPI
-from pydantic import BaseModel
 
 app = FastAPI()
 
-# Just to verify env vars are loading (Don't expose real secrets in production logs!)
-@app.on_event("startup")
-async def startup_event():
-    slack_channel = os.getenv("SLACK_ALERT_CHANNEL", "Not Set")
-    print(f"Server starting... Slack Channel is: {slack_channel}")
-    print(f"Environment is: {os.getenv('ENV', 'Unknown')}")
+def mask_secret(value: str):
+    if not value:
+        return "MISSING"
+    # Show first 4 chars to verify it's the right key, hide the rest
+    return f"{value[:4]}****************" if len(value) > 4 else "****"
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from GCP Cloud Run! Deployment successful."}
-
-@app.get("/health")
+@app.get("/healthz") # Changed to /healthz to match your YAML probe
 def health_check():
     return {"status": "healthy"}
 
 @app.get("/env-test")
 def read_dummy_env():
-    # Helper to see if our dummy variables exist
+    # This will prove if the data is actually arriving in the container
     return {
-        "database": os.getenv("DATABASE_URL"),
-        "slack_token_present": bool(os.getenv("SLACK_BOT_TOKEN")),
-        "dummy_key": os.getenv("API_KEY")
+        "ENV": os.getenv("ENV"),
+        "DATABASE_URL_MASKED": mask_secret(os.getenv("DATABASE_URL")),
+        "SLACK_CHANNEL": os.getenv("SLACK_ALERT_CHANNEL"),
+        "S3_BUCKET": os.getenv("NEUFIN_BACKEND_S3_BUCKET"),
+        "S3_REGION": os.getenv("NEUFIN_BACKEND_S3_REGION"),
+        "FASTAPI_PORT": os.getenv("PORT")
     }
 
 if __name__ == "__main__":
     import uvicorn
-    # Cloud Run expects us to listen on the port defined by PORT env var, or default 8000
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
