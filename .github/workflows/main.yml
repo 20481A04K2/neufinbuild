@@ -1,4 +1,4 @@
-name: Deploy to UAT (GCP Dummy Test)
+name: Deploy to UAT (GCP)
 
 on:
   push:
@@ -8,11 +8,10 @@ on:
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: asia-south1
-  REPO_NAME: lumen-repo
   SERVICE_NAME: lumen-uat-service
-  # Define dynamic image tags based on commit SHA
-  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lumen-repo/fastapi:lumen-uat-${{ github.sha }}
-  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lumen-repo/nginx:lumen-uat-${{ github.sha }}
+  # 2 Specific Repositories
+  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-lumen-uat/fastapi-lumen-uat:lumen-uat-${{ github.sha }}
+  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/nginx-lumen-uat/nginx-lumen-uat:lumen-uat-${{ github.sha }}
 
 jobs:
   build-and-deploy:
@@ -21,31 +20,23 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       # 1. Authenticate to Google Cloud
       - name: Google Auth
         id: auth
-        uses: google-github-actions/auth@v1
+        uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      # 2. Configure Docker to use Google Cloud credentials
+      # 2. Configure Docker
       - name: Configure Docker
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v3
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-
-      # 3. Create environment file
+      # 3. Create environment file (Stored on runner, will be copied into Docker)
       - name: Create environment file
         run: |
           cat > .env.uat << EOL
@@ -60,46 +51,40 @@ jobs:
           API_KEY=${{ secrets.API_KEY }}
           SERVICE_ACCOUNT_JSON=${{ secrets.SERVICE_ACCOUNT_JSON }}
           SERVICE_ACCOUNT_PATH=/tmp/service-account.json
-          CLERK_WEBHOOK_SIGNING_SECRET=${{secrets.CLERK_WEBHOOK_SIGNING_SECRET}}
-          CLERK_SECRET_KEY=${{secrets.CLERK_SECRET_KEY}}
-          SECRET_KEY=${{secrets.SECRET_KEY}}
-          RAZORPAY_AUTH_TOKEN=${{secrets.RAZORPAY_AUTH_TOKEN}}
-          ELMEASURE_URL=${{secrets.ELMEASURE_URL}}
-          RAZORPAY_VA_CREDITED_WEBHOOK_SECRET=${{secrets.RAZORPAY_VA_CREDITED_WEBHOOK_SECRET}}
+          CLERK_WEBHOOK_SIGNING_SECRET=${{ secrets.CLERK_WEBHOOK_SIGNING_SECRET }}
+          CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          RAZORPAY_AUTH_TOKEN=${{ secrets.RAZORPAY_AUTH_TOKEN }}
+          ELMEASURE_URL=${{ secrets.ELMEASURE_URL }}
+          RAZORPAY_VA_CREDITED_WEBHOOK_SECRET=${{ secrets.RAZORPAY_VA_CREDITED_WEBHOOK_SECRET }}
           ENV=dev
           EOL
 
-      # 4. Build and Push FastAPI Image
+      # 4. Build and Push FastAPI Image (Baked with .env.uat)
       - name: Build and push FastAPI image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: docker/uat/Dockerfile.fastapi
           platforms: linux/x86_64
           push: true
           tags: ${{ env.FASTAPI_IMAGE }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # 5. Build and Push Nginx Image
       - name: Build and push Nginx image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: docker/uat/Dockerfile.nginx
           platforms: linux/x86_64
           push: true
           tags: ${{ env.NGINX_IMAGE }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-
-      # 6. Generate Cloud Run Service YAML
-      # This file defines the explicit resources (4vCPU/8GB) and Sidecar logic
+      # 6. Generate Cloud Run Service YAML (Clean - Secrets are inside the image)
       - name: Create Cloud Run Service YAML
         run: |
           cat > service.yaml <<EOF
@@ -118,11 +103,10 @@ jobs:
                   run.googleapis.com/execution-environment: gen2
                   autoscaling.knative.dev/minScale: "1"
                   run.googleapis.com/startup-cpu-boost: "true"
+                  run.googleapis.com/container-dependencies: '{"nginx":["fastapi"]}'
               spec:
-                # Explicitly define the Service Account
                 serviceAccountName: 929981480750-compute@developer.gserviceaccount.com
                 containers:
-                  # --- CONTAINER 1: NGINX (Ingress - Port 80) ---
                   - name: nginx
                     image: ${{ env.NGINX_IMAGE }}
                     ports:
@@ -131,37 +115,39 @@ jobs:
                       limits:
                         memory: 512Mi
                         cpu: "500m"
-                        
-                  # --- CONTAINER 2: FASTAPI (Backend - Port 8000) ---
+                    readinessProbe:
+                      httpGet:
+                        path: /
+                        port: 80
+
                   - name: fastapi
                     image: ${{ env.FASTAPI_IMAGE }}
-                    env:
-                      - name: PORT
-                        value: "8000"
                     resources:
                       limits:
                         memory: 8Gi
                         cpu: "4"
-                    # CRITICAL: Cloud Run waits for this probe before routing traffic to Nginx
+                    env:
+                      - name: PORT
+                        value: "8000"
                     startupProbe:
-                      tcpSocket:
+                      httpGet:
+                        path: /healthz
                         port: 8000
-                      initialDelaySeconds: 5
-                      periodSeconds: 2
-                      failureThreshold: 10
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                      failureThreshold: 15
           EOF
 
-      # 7. Deploy to Cloud Run (Using REPLACE to enforce the YAML config)
+      # 7. Deploy to Cloud Run
       - name: Deploy to Cloud Run
         run: |
           gcloud run services replace service.yaml --region ${{ env.REGION }}
       
-      # 8. Verify Deployment Status
+      # 8. Verify
       - name: Verify Service Status
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)')
           echo "Deployment Complete!"
-          echo "Service is stable and accessible at: $SERVICE_URL"
+          echo "URL: $SERVICE_URL"
 
-          
 
