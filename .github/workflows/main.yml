@@ -130,7 +130,7 @@ jobs:
                     resources:
                       limits:
                         memory: 512Mi
-                        cpu: “500m”
+                        cpu: “1”
                         
                   # --- CONTAINER 2: FASTAPI (Backend - Port 8000) ---
                   - name: fastapi
