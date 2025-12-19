@@ -11,7 +11,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY . .
 
+# --- NEW: Copy the environment file created by GitHub Actions ---
+# We rename it to .env so standard libraries can find it easily
+COPY .env.uat .env
+
 # In Cloud Run Sidecars, we can listen on 8000. 
-# The Nginx container will talk to us via localhost:8000.
 ENV PORT=8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
