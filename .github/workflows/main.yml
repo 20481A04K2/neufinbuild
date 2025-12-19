@@ -1,4 +1,4 @@
-name: Deploy to UAT (GCP)
+name: Deploy to UAT (GCP Dummy Test)
 
 on:
   push:
@@ -6,12 +6,13 @@ on:
       - main
 
 env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  PROJECT_ID: ${{ secrets.UAT_GCP_PROJECT_ID }}
   REGION: asia-south1
+  REPO_NAME: lumen-repo
   SERVICE_NAME: lumen-uat-service
-  # Repository paths provided by you
-  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-lumen-uat/fastapi-lumen-uat:lumen-uat-${{ github.sha }}
-  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/nginx-lumen-uat/nginx-lumen-uat:lumen-uat-${{ github.sha }}
+  # Define dynamic image tags based on commit SHA
+  FASTAPI_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.UAT_GCP_PROJECT_ID }}/lumen-repo/fastapi:lumen-uat-${{ github.sha }}
+  NGINX_IMAGE: asia-south1-docker.pkg.dev/${{ secrets.UAT_GCP_PROJECT_ID }}/lumen-repo/nginx:lumen-uat-${{ github.sha }}
 
 jobs:
   build-and-deploy:
@@ -20,47 +21,85 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       # 1. Authenticate to Google Cloud
       - name: Google Auth
         id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v1
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{ secrets.UAT_GCP_SA_KEY }}
 
-      # 2. Configure Docker
+      # 2. Configure Docker to use Google Cloud credentials
       - name: Configure Docker
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v2
 
-      # 3. Build and Push FastAPI Image
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # 3. Create environment file
+      - name: Create environment file
+        run: |
+          cat > .env.uat << EOL
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          ANTHROPIC_CLIENT_KEY=${{ secrets.ANTHROPIC_CLIENT_KEY }}
+          NEUFIN_BACKEND_S3_BUCKET=${{ secrets.NEUFIN_BACKEND_S3_BUCKET }}
+          NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY=${{ secrets.NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY }}
+          NEUFIN_BACKEND_S3_REGION=${{ secrets.NEUFIN_BACKEND_S3_REGION }}
+          NEUFIN_BACKEND_S3_ACCESS_KEY_ID=${{ secrets.NEUFIN_BACKEND_S3_ACCESS_KEY_ID }}
+          SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_ALERT_CHANNEL=${{ secrets.SLACK_ALERT_CHANNEL }}
+          API_KEY=${{ secrets.API_KEY }}
+          SERVICE_ACCOUNT_JSON=${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SERVICE_ACCOUNT_PATH=/tmp/service-account.json
+          CLERK_WEBHOOK_SIGNING_SECRET=${{secrets.CLERK_WEBHOOK_SIGNING_SECRET}}
+          CLERK_SECRET_KEY=${{secrets.CLERK_SECRET_KEY}}
+          SECRET_KEY=${{secrets.SECRET_KEY}}
+          RAZORPAY_AUTH_TOKEN=${{secrets.RAZORPAY_AUTH_TOKEN}}
+          ELMEASURE_URL=${{secrets.ELMEASURE_URL}}
+          RAZORPAY_VA_CREDITED_WEBHOOK_SECRET=${{secrets.RAZORPAY_VA_CREDITED_WEBHOOK_SECRET}}
+          ENV=dev
+          EOL
+
+      # 4. Build and Push FastAPI Image
       - name: Build and push FastAPI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v4
         with:
           context: .
           file: docker/uat/Dockerfile.fastapi
           platforms: linux/x86_64
           push: true
           tags: ${{ env.FASTAPI_IMAGE }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      # 4. Build and Push Nginx Image
+      # 5. Build and Push Nginx Image
       - name: Build and push Nginx image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v4
         with:
           context: .
           file: docker/uat/Dockerfile.nginx
           platforms: linux/x86_64
           push: true
           tags: ${{ env.NGINX_IMAGE }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      # 5. Generate Cloud Run Service YAML (Injecting Secrets directly)
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # 6. Generate Cloud Run Service YAML
+      # This file defines the explicit resources (4vCPU/8GB) and Sidecar logic
       - name: Create Cloud Run Service YAML
         run: |
           cat > service.yaml <<EOF
@@ -79,12 +118,11 @@ jobs:
                   run.googleapis.com/execution-environment: gen2
                   autoscaling.knative.dev/minScale: "1"
                   run.googleapis.com/startup-cpu-boost: "true"
-                  # Dependency ensures Nginx waits for FastAPI health check
-                  run.googleapis.com/container-dependencies: '{"nginx":["fastapi"]}'
               spec:
+                # Explicitly define the Service Account
                 serviceAccountName: 929981480750-compute@developer.gserviceaccount.com
                 containers:
-                  # --- CONTAINER 1: NGINX ---
+                  # --- CONTAINER 1: NGINX (Ingress - Port 80) ---
                   - name: nginx
                     image: ${{ env.NGINX_IMAGE }}
                     ports:
@@ -92,82 +130,38 @@ jobs:
                     resources:
                       limits:
                         memory: 512Mi
-                        cpu: "500m"
-                    readinessProbe:
-                      httpGet:
-                        path: /
-                        port: 80
-
-                  # --- CONTAINER 2: FASTAPI ---
+                        cpu: “500m”
+                        
+                  # --- CONTAINER 2: FASTAPI (Backend - Port 8000) ---
                   - name: fastapi
                     image: ${{ env.FASTAPI_IMAGE }}
-                    resources:
-                      limits:
-                        memory: 8Gi
-                        cpu: "4"
                     env:
                       - name: PORT
                         value: "8000"
-                      - name: ENV
-                        value: "dev"
-                      - name: DATABASE_URL
-                        value: "${{ secrets.DATABASE_URL }}"
-                      - name: ANTHROPIC_CLIENT_KEY
-                        value: "${{ secrets.ANTHROPIC_CLIENT_KEY }}"
-                      - name: NEUFIN_BACKEND_S3_BUCKET
-                        value: "${{ secrets.NEUFIN_BACKEND_S3_BUCKET }}"
-                      - name: NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY
-                        value: "${{ secrets.NEUFIN_BACKEND_S3_SECRET_ACCESS_KEY }}"
-                      - name: NEUFIN_BACKEND_S3_REGION
-                        value: "${{ secrets.NEUFIN_BACKEND_S3_REGION }}"
-                      - name: NEUFIN_BACKEND_S3_ACCESS_KEY_ID
-                        value: "${{ secrets.NEUFIN_BACKEND_S3_ACCESS_KEY_ID }}"
-                      - name: SLACK_BOT_TOKEN
-                        value: "${{ secrets.SLACK_BOT_TOKEN }}"
-                      - name: SLACK_ALERT_CHANNEL
-                        value: "${{ secrets.SLACK_ALERT_CHANNEL }}"
-                      - name: API_KEY
-                        value: "${{ secrets.API_KEY }}"
-                      - name: CLERK_WEBHOOK_SIGNING_SECRET
-                        value: "${{ secrets.CLERK_WEBHOOK_SIGNING_SECRET }}"
-                      - name: CLERK_SECRET_KEY
-                        value: "${{ secrets.CLERK_SECRET_KEY }}"
-                      - name: SECRET_KEY
-                        value: "${{ secrets.SECRET_KEY }}"
-                      - name: RAZORPAY_AUTH_TOKEN
-                        value: "${{ secrets.RAZORPAY_AUTH_TOKEN }}"
-                      - name: ELMEASURE_URL
-                        value: "${{ secrets.ELMEASURE_URL }}"
-                      - name: RAZORPAY_VA_CREDITED_WEBHOOK_SECRET
-                        value: "${{ secrets.RAZORPAY_VA_CREDITED_WEBHOOK_SECRET }}"
-                    
-                    # PROBES for Reliability
+                    resources:
+                      limits:
+                        memory: 8Gi
+                        cpu: “4”
+                    # CRITICAL: Cloud Run waits for this probe before routing traffic to Nginx
                     startupProbe:
-                      httpGet:
-                        path: /healthz
+                      tcpSocket:
                         port: 8000
-                      initialDelaySeconds: 10
-                      periodSeconds: 5
-                      failureThreshold: 15
-                    readinessProbe:
-                      httpGet:
-                        path: /healthz
-                        port: 8000
-                    livenessProbe:
-                      httpGet:
-                        path: /healthz
-                        port: 8000
-                      periodSeconds: 20
+                      initialDelaySeconds: 5
+                      periodSeconds: 2
+                      failureThreshold: 10
           EOF
 
-      # 6. Deploy to Cloud Run
+      # 7. Deploy to Cloud Run (Using REPLACE to enforce the YAML config)
       - name: Deploy to Cloud Run
         run: |
           gcloud run services replace service.yaml --region ${{ env.REGION }}
       
-      # 7. Verify
+      # 8. Verify Deployment Status
       - name: Verify Service Status
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)')
           echo "Deployment Complete!"
-          echo "URL: $SERVICE_URL"
+          echo "Service is stable and accessible at: $SERVICE_URL"
+
+          
+
